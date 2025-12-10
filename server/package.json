@@ -1,0 +1,10 @@
+{
+  "scripts":{
+  "dev":"nodemon dist/index.js"
+  },
+  "dependencies": {
+    "@types/ws": "^8.18.1",
+    "nodemon": "^3.1.11",
+    "ws": "^8.18.3"
+  }
+}
