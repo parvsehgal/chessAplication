@@ -1,5 +1,3 @@
-//need to have correct typing for the gameLobby 
-//and need the correct methods for the adding of players
 import WebSocket from "ws"
 interface gameRequest{
   username :string,
@@ -23,14 +21,15 @@ export class Game{
     this.gameState = []
     console.log("game created sending message to participants")
     console.log(req1.id)
-    const clientWs = req1.id
-    clientWs.send("you are in a game")
+    const clientW = req1.id
+    const clientB = req2.id
+    clientW.send("you are in a game as white") //should be the gamestate
+    clientB.send("you are in a game as black")
     //should have the socket ids of both of these users to send them a message of their game creation
     //would be able to then send move between the 2 users
   }
 }
 export class gameManager{
-  //lets make the lobby have the same typing as createGame request
   gameLobby :gameRequest[]= []
   gameList : Game[] = []
   addPlayerToLobby(createGameReq:gameRequest){
