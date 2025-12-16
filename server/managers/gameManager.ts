@@ -1,58 +1,94 @@
-import WebSocket from "ws"
-interface gameRequest{
-  username :string,
-  action:string,
-  timeControl:string,
-  id:WebSocket
-}
-export class Game{
-  //should probably use an instance of the chess.js library for move validation
-  gameId :string;
-  playerW :string;
-  playerB :string;
-  gameState :string[];
-  //probably need the gameState to be the FEN string
+import WebSocket from "ws";
+import { randomUUID } from "crypto";
 
-  constructor(req1:gameRequest,req2:gameRequest){
-    this.gameId = req1.username+req2.username
-    //would like to choose randomly but rn hardcode should do
-    this.playerW = req1.username
-    this.playerB = req2.username
-    this.gameState = []
-    console.log("game created sending message to participants")
-    console.log(req1.id)
-    const clientW = req1.id
-    const clientB = req2.id
-    clientW.send("you are in a game as white") //should be the gamestate
-    clientB.send("you are in a game as black")
-    //should have the socket ids of both of these users to send them a message of their game creation
-    //would be able to then send move between the 2 users
+interface gameRequest {
+  username: string;
+  action: string;
+  timeControl: string;
+  id: WebSocket;
+}
+
+export class Game {
+  gameId: string;
+  playerW: string;
+  playerB: string;
+  gameState: string[];
+  socketW: WebSocket;
+  socketB: WebSocket;
+
+  constructor(req1: gameRequest, req2: gameRequest) {
+    this.gameId = randomUUID().split("-")[0]; // Short unique ID
+
+    // Randomly assign colors
+    const random = Math.random() < 0.5;
+    this.playerW = random ? req1.username : req2.username;
+    this.playerB = random ? req2.username : req1.username;
+    this.socketW = random ? req1.id : req2.id;
+    this.socketB = random ? req2.id : req1.id;
+
+    this.gameState = [];
+
+    console.log(
+      `Game ${this.gameId} created: ${this.playerW} (W) vs ${this.playerB} (B)`,
+    );
+
+    const gameObjW = {
+      gameId: this.gameId,
+      color: "white",
+      opponent: this.playerB,
+      gameState: this.gameState,
+    };
+
+    const gameObjB = {
+      gameId: this.gameId,
+      color: "black",
+      opponent: this.playerW,
+      gameState: this.gameState,
+    };
+
+    this.socketW.send(JSON.stringify(gameObjW));
+    this.socketB.send(JSON.stringify(gameObjB));
+  }
+
+  isPlayerInGame(username: string): boolean {
+    return this.playerW === username || this.playerB === username;
   }
 }
-export class gameManager{
-  gameLobby :gameRequest[]= []
-  gameList : Game[] = []
-  addPlayerToLobby(createGameReq:gameRequest){
-    this.gameLobby.push(createGameReq)
-    //after each addition to lobby try to see if a game can be made
-    while(this.gameLobby.length !==0 ){
-      if(this.gameLobby.length != 2){
-        //do an early return from the loop
-        break
-      }
-      const req1 = this.gameLobby.shift()
-      const req2 = this.gameLobby.shift()
-      if(req1 && req2){
-        const game = new Game(req1,req2)
-        this.gameList.push(game)
+
+export class gameManager {
+  gameLobby: gameRequest[] = [];
+  gameList: Game[] = [];
+  private gameMap: Map<string, Game> = new Map();
+  private playerGameMap: Map<string, string> = new Map();
+
+  addPlayerToLobby(createGameReq: gameRequest) {
+    if (this.playerGameMap.has(createGameReq.username)) {
+      console.log(`${createGameReq.username} already in a game`);
+      return;
+    }
+
+    this.gameLobby.push(createGameReq);
+
+    while (this.gameLobby.length >= 2) {
+      const req1 = this.gameLobby.shift();
+      const req2 = this.gameLobby.shift();
+
+      if (req1 && req2) {
+        const game = new Game(req1, req2);
+        this.gameList.push(game);
+        this.gameMap.set(game.gameId, game);
+        this.playerGameMap.set(req1.username, game.gameId);
+        this.playerGameMap.set(req2.username, game.gameId);
       }
     }
-    console.log("game lobby rn")
-    console.log(this.gameLobby)
-    this.seeActiveGames()
   }
-  seeActiveGames(){
-   console.log("game list rn")
-   console.log(this.gameList)
+
+  getGame(gameId: string): Game | undefined {
+    return this.gameMap.get(gameId);
+  }
+
+  validateMove(gameId: string, username: string): boolean {
+    const game = this.gameMap.get(gameId);
+    return game ? game.isPlayerInGame(username) : false;
   }
 }
