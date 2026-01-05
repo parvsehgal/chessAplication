@@ -58,7 +58,9 @@ export class Game {
 export class gameManager {
   gameLobby: gameRequest[] = [];
   gameList: Game[] = [];
+  //maps game id to its game object
   private gameMap: Map<string, Game> = new Map();
+  //maps username with gameid
   private playerGameMap: Map<string, string> = new Map();
 
   addPlayerToLobby(createGameReq: gameRequest) {
@@ -81,9 +83,14 @@ export class gameManager {
         this.playerGameMap.set(req2.username, game.gameId);
       }
     }
+    this.showAllGames();
   }
 
+  showAllGames() {
+    console.log(this.gameList);
+  }
   getGame(gameId: string): Game | undefined {
+    //this returns the game object when given its id
     return this.gameMap.get(gameId);
   }
 

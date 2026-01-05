@@ -9,12 +9,11 @@ wss.on("connection", function connection(ws) {
   ws.on("error", console.error);
   ws.on("message", function message(data) {
     const event = JSON.parse(data.toString());
+    //each event from a client gets its websocket acctached to it as its id
     event.id = ws;
     if (event.action == "createGame") {
+      //only tell the gamemanager to put the current player in lobby if they requested to create a game
       mainGameManager.addPlayerToLobby(event);
-      //receive list of active games and then send the gameIds to their respective players
-    } else {
-      mainGameManager.seeActiveGames();
     }
   });
   console.log("a player got made connection to this server");
