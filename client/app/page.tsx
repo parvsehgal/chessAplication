@@ -193,12 +193,15 @@ export default function Home() {
       );
   };
 
+  // Derive turn from server FEN (currentGame.gameState) so it updates when server sends new state.
+  // FEN format: "pieces position active_color ..." — active color is 2nd field, "w" or "b".
+  const activeColor = currentGame?.gameState?.split(" ")[1];
   const myTurn =
     currentGame &&
-    chessRef.current &&
-    !chessRef.current.game_over() &&
-    ((chessRef.current.turn() === "w" && currentGame.color === "white") ||
-      (chessRef.current.turn() === "b" && currentGame.color === "black"));
+    activeColor &&
+    !gameOver &&
+    ((activeColor === "w" && currentGame.color === "white") ||
+      (activeColor === "b" && currentGame.color === "black"));
 
   return (
     <>
