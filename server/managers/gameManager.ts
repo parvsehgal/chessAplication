@@ -8,6 +8,7 @@ interface gameRequest {
   action: string;
   timeControl: string;
   id: WebSocket;
+  sessionId?: string;
 }
 export interface playerGameObj {
   gameId: string;
@@ -20,8 +21,10 @@ export class Game {
   playerW: string;
   playerB: string;
   gameState: string; //should be a FEN string
-  socketW: WebSocket;
-  socketB: WebSocket;
+  socketW: WebSocket | null;
+  socketB: WebSocket | null;
+  sessionIdW: string | undefined;
+  sessionIdB: string | undefined;
   moveManagerOfGame: moveManager;
 
   constructor(req1: gameRequest, req2: gameRequest) {
@@ -33,6 +36,8 @@ export class Game {
     this.playerB = random ? req2.username : req1.username;
     this.socketW = random ? req1.id : req2.id;
     this.socketB = random ? req2.id : req1.id;
+    this.sessionIdW = random ? req1.sessionId : req2.sessionId;
+    this.sessionIdB = random ? req2.sessionId : req1.sessionId;
 
     this.gameState = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
@@ -54,9 +59,26 @@ export class Game {
       gameState: this.gameState,
     };
 
-    this.socketW.send(JSON.stringify(gameObjW));
-    this.socketB.send(JSON.stringify(gameObjB));
+    this.sendToWhite(gameObjW);
+    this.sendToBlack(gameObjB);
     this.moveManagerOfGame = new moveManager(this.gameState);
+  }
+
+  private sendToWhite(data: object) {
+    if (this.socketW?.readyState === 1) this.socketW.send(JSON.stringify(data));
+  }
+  private sendToBlack(data: object) {
+    if (this.socketB?.readyState === 1) this.socketB.send(JSON.stringify(data));
+  }
+
+  clearSocket(ws: WebSocket) {
+    if (this.socketW === ws) this.socketW = null;
+    else if (this.socketB === ws) this.socketB = null;
+  }
+
+  replaceSocketBySessionId(sessionId: string, ws: WebSocket) {
+    if (this.sessionIdW === sessionId) this.socketW = ws;
+    else if (this.sessionIdB === sessionId) this.socketB = ws;
   }
 
   isPlayerInGame(username: string): boolean {
@@ -83,34 +105,51 @@ export class Game {
         opponent: this.playerW,
         gameState: this.gameState,
       };
-      this.socketW.send(JSON.stringify(gameObjW));
-      this.socketB.send(JSON.stringify(gameObjB));
+      this.sendToWhite(gameObjW);
+      this.sendToBlack(gameObjB);
     } else if (acutalMoveOutput.isGameEnd && acutalMoveOutput.newState) {
       this.gameState = acutalMoveOutput.newState;
       const gameOverMsg = {
         state: this.gameState,
         message: "game is over",
       };
-      this.socketW.send(JSON.stringify(gameOverMsg));
-      this.socketB.send(JSON.stringify(gameOverMsg));
+      this.sendToWhite(gameOverMsg);
+      this.sendToBlack(gameOverMsg);
     } else {
-      //the output does not have a new state which means that it was not a valid move
       if (gameObj.color == "white") {
-        this.socketW.send(acutalMoveOutput.message); //reason for the invalid move
+        this.sendToWhite({ message: acutalMoveOutput.message });
       } else {
-        this.socketB.send(acutalMoveOutput.message);
+        this.sendToBlack({ message: acutalMoveOutput.message });
       }
     }
+  }
+
+  resign(gameObj: playerGameObj) {
+    const msg = {
+      state: this.gameState,
+      message: "game is over",
+      reason: "resign",
+    };
+    this.sendToWhite(msg);
+    this.sendToBlack(msg);
+  }
+
+  leaveGame(ws: WebSocket) {
+    const isWhite = this.socketW === ws;
+    const opponentSocket = isWhite ? this.socketB : this.socketW;
+    if (opponentSocket?.readyState === 1)
+      opponentSocket.send(
+        JSON.stringify({ message: "game is over", reason: "opponent_left" })
+      );
   }
 }
 
 export class gameManager {
   gameLobby: gameRequest[] = [];
   gameList: Game[] = [];
-  //maps game id to its game object
   private gameMap: Map<string, Game> = new Map();
-  //maps username with gameid
   private playerGameMap: Map<string, string> = new Map();
+  private socketToGameId: Map<WebSocket, string> = new Map();
 
   addPlayerToLobby(createGameReq: gameRequest) {
     //not let the user enter the lobby if they are already in there
@@ -141,10 +180,17 @@ export class gameManager {
         this.gameMap.set(game.gameId, game);
         this.playerGameMap.set(req1.username, game.gameId);
         this.playerGameMap.set(req2.username, game.gameId);
+        this.socketToGameId.set(req1.id, game.gameId);
+        this.socketToGameId.set(req2.id, game.gameId);
       }
     }
     console.log(this.gameLobby);
     this.showAllGames();
+  }
+
+  removeFromLobby(ws: WebSocket) {
+    this.gameLobby = this.gameLobby.filter((req) => req.id !== ws);
+    console.log("Player left lobby, remaining:", this.gameLobby.length);
   }
 
   showAllGames() {
@@ -163,6 +209,61 @@ export class gameManager {
     const game = this.getGame(gameObj.gameId);
     if (game) {
       game.makeMove(gameObj, move);
+    }
+  }
+
+  removeGame(gameId: string) {
+    const game = this.gameMap.get(gameId);
+    if (game) {
+      if (game.socketW) this.socketToGameId.delete(game.socketW);
+      if (game.socketB) this.socketToGameId.delete(game.socketB);
+      this.playerGameMap.delete(game.playerW);
+      this.playerGameMap.delete(game.playerB);
+      this.gameMap.delete(gameId);
+      this.gameList = this.gameList.filter((g) => g.gameId !== gameId);
+    }
+  }
+
+  handleDisconnect(ws: WebSocket) {
+    const gameId = this.socketToGameId.get(ws);
+    this.socketToGameId.delete(ws);
+    const game = gameId ? this.gameMap.get(gameId) : undefined;
+    if (game) game.clearSocket(ws);
+  }
+
+  rejoin(sessionId: string, ws: WebSocket) {
+    const game = this.gameList.find(
+      (g) => g.sessionIdW === sessionId || g.sessionIdB === sessionId
+    );
+    if (!game) {
+      ws.send(JSON.stringify({ message: "no game to rejoin" }));
+      return;
+    }
+    game.replaceSocketBySessionId(sessionId, ws);
+    this.socketToGameId.set(ws, game.gameId);
+    const isWhite = game.sessionIdW === sessionId;
+    const payload = {
+      gameId: game.gameId,
+      color: isWhite ? "white" : "black",
+      opponent: isWhite ? game.playerB : game.playerW,
+      gameState: game.gameState,
+    };
+    ws.send(JSON.stringify(payload));
+  }
+
+  resign(gameObj: playerGameObj) {
+    const game = this.getGame(gameObj.gameId);
+    if (game) {
+      game.resign(gameObj);
+      this.removeGame(gameObj.gameId);
+    }
+  }
+
+  leaveGame(gameId: string, ws: WebSocket) {
+    const game = this.getGame(gameId);
+    if (game) {
+      game.leaveGame(ws);
+      this.removeGame(gameId);
     }
   }
 }

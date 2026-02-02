@@ -25,7 +25,10 @@ export default function Home() {
   const [gameOver, setGameOver] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [findingGame, setFindingGame] = useState(false);
+  const [waitSeconds, setWaitSeconds] = useState(0);
   const [username, setUsername] = useState("");
+  const sessionIdRef = useRef<string>("");
+  const currentGameRef = useRef<GameState | null>(null);
   const [jqueryLoaded, setJqueryLoaded] = useState(false);
   const [chessboardLoaded, setChessboardLoaded] = useState(false);
   const [chessJsLoaded, setChessJsLoaded] = useState(false);
@@ -48,45 +51,102 @@ export default function Home() {
     };
   }, []);
 
-  // WebSocket
+  // Session id for reconnect (persist in localStorage)
   useEffect(() => {
-    const websocket = new WebSocket("ws://localhost:8080");
-    websocket.onopen = () => setStatusMessage(null);
-    websocket.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.message === "game is over" && data.state) {
-          setCurrentGame((prev) =>
-            prev ? { ...prev, gameState: data.state } : null
+    if (typeof window === "undefined") return;
+    let id = localStorage.getItem("chessSessionId");
+    if (!id) {
+      id = crypto.randomUUID?.() ?? `session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      localStorage.setItem("chessSessionId", id);
+    }
+    sessionIdRef.current = id;
+  }, []);
+
+  currentGameRef.current = currentGame;
+
+  // WebSocket with reconnect when in a game
+  useEffect(() => {
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let mounted = true;
+    let websocket: WebSocket;
+
+    function connect() {
+      websocket = new WebSocket("ws://localhost:5556");
+      websocket.onopen = () => {
+        setStatusMessage(null);
+        if (currentGameRef.current && sessionIdRef.current) {
+          websocket.send(
+            JSON.stringify({
+              action: "rejoin",
+              sessionId: sessionIdRef.current,
+            })
           );
-          setGameOver(true);
-          setStatusMessage("Game over.");
-          if (chessRef.current) chessRef.current.load(data.state);
-          if (boardRef.current) boardRef.current.position(data.state.split(" ")[0]);
-          return;
         }
-        if (data.gameId && data.gameState) {
-          setFindingGame(false);
-          setGameOver(false);
-          setStatusMessage(null);
-          setCurrentGame(data);
-          return;
+      };
+      websocket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.message === "game is over") {
+            if (data.state) {
+              setCurrentGame((prev) =>
+                prev ? { ...prev, gameState: data.state } : null
+              );
+              if (chessRef.current) chessRef.current.load(data.state);
+              if (boardRef.current) boardRef.current.position(data.state.split(" ")[0]);
+            }
+            setGameOver(true);
+            if (data.reason === "opponent_left") {
+              setStatusMessage("Opponent left.");
+              setTimeout(() => {
+                setCurrentGame(null);
+                setGameOver(false);
+                setStatusMessage(null);
+              }, 2000);
+            } else if (data.reason === "resign") {
+              setStatusMessage("Game over (resignation).");
+            } else {
+              setStatusMessage("Game over.");
+            }
+            return;
+          }
+          if (data.gameId && data.gameState) {
+            setFindingGame(false);
+            setGameOver(false);
+            setStatusMessage(null);
+            setCurrentGame(data);
+            return;
+          }
+          if (data.message === "no game to rejoin") {
+            setStatusMessage("No game to rejoin.");
+            setCurrentGame(null);
+            currentGameRef.current = null;
+            return;
+          }
+        } catch {
+          const text = event.data.toString();
+          if (text.includes("connected")) setStatusMessage(null);
+          else if (text.includes("lobby") || text.includes("already in a game"))
+            setFindingGame(false);
+          setStatusMessage(text);
         }
-      } catch {
-        // Plain text: connection confirm or error
-        const text = event.data.toString();
-        if (text.includes("connected")) setStatusMessage(null);
-        else if (text.includes("lobby") || text.includes("already in a game"))
-          setFindingGame(false);
-        setStatusMessage(text);
-      }
+      };
+      websocket.onerror = () =>
+        setStatusMessage("Connection error. Is the server running on port 5556?");
+      websocket.onclose = () => {
+        setWs(null);
+        setStatusMessage("Disconnected. Reconnecting…");
+        if (mounted && currentGameRef.current) {
+          reconnectTimeout = setTimeout(() => connect(), 2000);
+        }
+      };
+      setWs(websocket);
+    }
+    connect();
+    return () => {
+      mounted = false;
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      websocket.close();
     };
-    websocket.onerror = () =>
-      setStatusMessage("Connection error. Is the server running on port 8080?");
-    websocket.onclose = () =>
-      setStatusMessage("Disconnected. Reconnect by refreshing.");
-    setWs(websocket);
-    return () => websocket.close();
   }, []);
 
   const onDragStart = (
@@ -176,6 +236,17 @@ export default function Home() {
     boardRef.current.position(currentGame.gameState.split(" ")[0]);
   }, [currentGame?.gameState]);
 
+  // Timer while finding opponent
+  useEffect(() => {
+    if (!findingGame) {
+      setWaitSeconds(0);
+      return;
+    }
+    const start = Date.now();
+    const id = setInterval(() => setWaitSeconds(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [findingGame]);
+
   const enterNewGame = () => {
     if (!username.trim()) {
       setStatusMessage("Enter a username to find a game.");
@@ -189,8 +260,42 @@ export default function Home() {
           username: username.trim(),
           action: "createGame",
           timeControl: "rapid",
+          sessionId: sessionIdRef.current || undefined,
         })
       );
+  };
+
+  const cancelSearch = () => {
+    if (ws) ws.send(JSON.stringify({ action: "cancelSearch" }));
+    setFindingGame(false);
+    setStatusMessage(null);
+  };
+
+  const resign = () => {
+    if (ws && currentGame) {
+      ws.send(
+        JSON.stringify({
+          action: "resign",
+          gameObj: {
+            gameId: currentGame.gameId,
+            color: currentGame.color,
+            opponent: currentGame.opponent,
+            gameState: currentGame.gameState,
+          },
+        })
+      );
+      setGameOver(true);
+      setStatusMessage("Game over (resignation).");
+    }
+  };
+
+  const leaveGame = () => {
+    if (ws && currentGame) {
+      ws.send(JSON.stringify({ action: "leaveGame", gameId: currentGame.gameId }));
+      setCurrentGame(null);
+      setGameOver(false);
+      setStatusMessage("You left the game.");
+    }
   };
 
   // Derive turn from server FEN (currentGame.gameState) so it updates when server sends new state.
@@ -266,6 +371,21 @@ export default function Home() {
               >
                 {findingGame ? "Finding opponent…" : "Find a game"}
               </button>
+              {findingGame && (
+                <div className="flex flex-col items-center gap-2">
+                  <div className="flex items-center justify-center gap-2 text-sm text-[var(--cream-muted)]">
+                    <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-[var(--cream-muted)] border-t-[var(--gold)]" aria-hidden />
+                    <span>Waiting {waitSeconds}s</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={cancelSearch}
+                    className="text-sm text-[var(--cream-muted)] underline hover:text-[var(--cream)]"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
             </div>
             {statusMessage && (
               <p
@@ -316,6 +436,25 @@ export default function Home() {
                 <p className="text-[var(--cream-muted)]">Opponent’s turn</p>
               )}
             </div>
+
+            {!gameOver && currentGame && (
+              <div className="flex items-center gap-3 animate-fade-up animate-fade-up-delay-3">
+                <button
+                  type="button"
+                  onClick={resign}
+                  className="rounded-[var(--radius)] border border-[var(--felt-light)] bg-[var(--felt)] px-3 py-2 text-sm text-[var(--cream-muted)] hover:text-[var(--cream)]"
+                >
+                  Resign
+                </button>
+                <button
+                  type="button"
+                  onClick={leaveGame}
+                  className="rounded-[var(--radius)] border border-[var(--felt-light)] bg-[var(--felt)] px-3 py-2 text-sm text-[var(--cream-muted)] hover:text-[var(--cream)]"
+                >
+                  Leave game
+                </button>
+              </div>
+            )}
 
             {statusMessage && (
               <p className="text-sm text-[var(--cream-muted)]" role="alert">
