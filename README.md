@@ -1,127 +1,109 @@
 # Chess Application
 
-A real-time multiplayer chess game with a **Next.js** frontend and a **WebSocket** backend. Players connect to the server, enter a lobby, get matched into games, and play chess with live board sync.
+A **real-time multiplayer chess game** you can run locally. Two players connect to the same server, enter a lobby, get matched automatically, and play chess with live board updates.
+
+**Educational purpose:** This project is for learning. Use it to see how **WebSockets** work in a small, end-to-end app — connection, client/server messages, matchmaking, and live state sync — without extra complexity.
 
 ---
 
-## Project structure
+## What it does
 
-```
-chessAplication/
-├── client/          # Next.js 16 frontend (React 19, Tailwind CSS)
-│   ├── app/         # App Router: page.tsx, layout.tsx, globals.css
-│   └── ...
-├── server/          # Node.js WebSocket server (TypeScript)
-│   ├── index.ts     # WebSocket server entry, event routing
-│   └── managers/
-│       ├── gameManager.ts   # Lobby, matchmaking, Game instances
-│       └── moveManager.ts  # Chess rules (chess.js), move validation
-└── README.md
-```
-
-- **Backend** (you built this): WebSocket server on port **8080**, lobby-based matchmaking, one `Game` per two players, FEN-based game state, move validation via `chess.js`.
-- **Frontend** (from create-next-app): Connects to `ws://localhost:8080`, loads chessboard (chessboard.js + chess.js from CDN), “Play a rapid game” to join lobby; when matched, shows board and sends moves as SAN.
+- **Lobby:** You enter a username and click “Find a game”. When a second player does the same, you are paired.
+- **Game:** You are assigned white or black at random. You see the board from your side, your opponent’s name, and whose turn it is. Moves sync in real time; when the game ends, you see “Game over.”
+- **Tech:** A WebSocket server (Node.js) handles matchmaking and move validation. A web client (Next.js) connects to it and shows the board. No database — everything is in memory for the session.
 
 ---
 
-## Tech stack
+## How to run it (for others)
 
-| Layer    | Tech |
-|----------|------|
-| **Server** | Node.js, `ws`, TypeScript, `chess.js`, `nodemon` |
-| **Client** | Next.js 16, React 19, Tailwind CSS 4, chessboard.js (CDN), chess.js (CDN) |
+You need **Node.js** (v18+) and **npm**. Run **both** the server and the client.
 
----
-
-## Prerequisites
-
-- **Node.js** (v18+ recommended)
-- **npm** (or yarn/pnpm)
-
----
-
-## Running the app
-
-You need **both** the server and the client.
-
-### 1. Server (port 8080)
-
-The server runs from **compiled** JavaScript in `dist/`. There is no `build` script in `package.json` yet, so compile and run like this:
+### 1. Clone and start the server
 
 ```bash
-cd server
+git clone <this-repo-url>
+cd chessAplication/server
 npm install
 npx tsc
 npm run dev
 ```
 
-- `npx tsc` compiles TypeScript from `server/` into `server/dist/`.
-- `npm run dev` runs `nodemon dist/index.js` (restarts on file changes; you still need to run `tsc` again after editing `.ts` files).
+You should see the server running (e.g. “a player got made connection” when something connects). It listens on **port 8080**.
 
-**Optional:** add a build script so you can run `npm run build` then `npm run dev`:
+### 2. Start the client
 
-```json
-"scripts": {
-  "build": "tsc",
-  "dev": "nodemon dist/index.js"
-}
-```
-
-### 2. Client (port 3000)
+In a **new terminal**:
 
 ```bash
-cd client
+cd chessAplication/client
 npm install
 npm run dev
 ```
 
-Then open **http://localhost:3000**. The client expects the WebSocket server at **ws://localhost:8080**.
+Open **http://localhost:3000** in your browser. The client connects to the server at `ws://localhost:8080`.
+
+### 3. Play
+
+- Enter a username and click **Find a game**.
+- Open another browser tab (or another browser) and do the same with a different username. You’ll be matched and the game starts.
+- Drag and drop pieces to move. Refresh the page to leave a game (there is no exit button yet).
 
 ---
 
-## WebSocket API (server ↔ client)
+## App structure
+
+What each part of the repo is for:
+
+```
+chessAplication/
+├── client/                    # Web frontend (Next.js)
+│   ├── app/
+│   │   ├── page.tsx           # Single page: lobby + game board, WebSocket logic
+│   │   ├── layout.tsx         # Root layout, fonts, metadata
+│   │   └── globals.css        # Theme (colors, typography), board frame styles
+│   └── package.json           # Next.js 16, React 19, Tailwind CSS 4
+│
+├── server/                    # WebSocket game server (Node.js + TypeScript)
+│   ├── index.ts               # WebSocket server on port 8080, routes actions to gameManager
+│   ├── managers/
+│   │   ├── gameManager.ts     # Lobby queue, matchmaking, Game instances, player–game mapping
+│   │   └── moveManager.ts     # Chess rules (chess.js), move validation, FEN updates
+│   └── package.json           # ws, chess.js, nodemon, TypeScript
+│
+└── README.md                  # This file
+```
+
+- **client/app/page.tsx** — Connects to the server, sends “createGame” and “makeMove”, receives game state, renders the lobby or the board (using chessboard.js + chess.js from CDN).
+- **server/index.ts** — Accepts WebSocket connections; parses messages and calls `gameManager` for `createGame` and `makeMove`.
+- **server/managers/gameManager.ts** — Keeps a lobby list; when two players are in the lobby, creates a `Game`, assigns colors, and forwards moves to that game. Each `Game` holds both players’ sockets and the current FEN.
+- **server/managers/moveManager.ts** — Wraps `chess.js` to validate moves and return the new FEN (or an error). Used by `Game` to apply moves.
+
+---
+
+## Tech stack
+
+| Part    | Tech |
+|---------|------|
+| Server  | Node.js, `ws`, TypeScript, `chess.js`, `nodemon` |
+| Client  | Next.js 16, React 19, Tailwind CSS 4, chessboard.js (CDN), chess.js (CDN) |
+
+Game state is **FEN**; the server is the source of truth for each game and broadcasts the updated FEN after every valid move.
+
+---
+
+## WebSocket API (for developers)
 
 - **Client → Server**
-  - **Create game / join lobby**
-    - `{ "action": "createGame", "username": "<name>", "timeControl": "rapid" }`
-  - **Make move**
-    - `{ "action": "makeMove", "gameObj": { "gameId", "color", "opponent", "gameState" }, "move": "<SAN>" }`  
-    - Example: `"move": "e4"`.
-
+  - `createGame`: `{ "action": "createGame", "username": "<name>", "timeControl": "rapid" }`
+  - `makeMove`: `{ "action": "makeMove", "gameObj": { "gameId", "color", "opponent", "gameState" }, "move": "<SAN>" }` (e.g. `"move": "e4"`)
 - **Server → Client**
-  - **Connection:** plain text `"connected to the game server"`.
-  - **Matched into a game:** JSON `{ "gameId", "color", "opponent", "gameState" }` (FEN).
-  - **After each move:** same JSON with updated `gameState`.
-  - **Game over:** `{ "state": "<FEN>", "message": "game is over" }`.
-  - **Errors (lobby/game):** plain text, e.g. `"you are already in a game play that"`, `"not your turn rn"`, invalid-move message.
-
-Game state is **FEN**; the server uses `chess.js` in `moveManager` to validate moves and update state.
-
----
-
-## Current behavior (quick reference)
-
-- **Lobby:** First two players sending `createGame` are paired; each gets a `Game` with random white/black and initial FEN.
-- **Play:** Each client has a board (orientation by color). Moves are validated locally with chess.js and sent as SAN; server re-validates and broadcasts new FEN to both players.
-- **Frontend:** Single page: connection status, script load status, “Play a rapid game”, and when in a game: game id, your color, opponent, and the board. Username is currently hardcoded in `page.tsx` (e.g. `"chiraggupta"`).
-
----
-
-## Branches
-
-- **main (or default):** Current state as above.
-- **ui-revamp:** Branch for UI/UX improvements (e.g. layout, styling, flows). The core client/server behavior is the same; this branch is for making the frontend better.
-
----
-
-## Possible next steps
-
-- Add a `build` script in `server/package.json` and document `npm run build` in this README.
-- On **ui-revamp:** improve layout (e.g. hide raw “Messages”, clean up status text), optional username input, and better game-over/not-your-turn feedback.
-- Consider moving chess logic to the server only (client sends from/to or SAN, server is source of truth) to avoid desyncs if you add more features later.
+  - On match: `{ "gameId", "color", "opponent", "gameState" }` (FEN)
+  - After each move: same object with updated `gameState`
+  - Game over: `{ "state": "<FEN>", "message": "game is over" }`
+  - Errors: plain text (e.g. “you are already in a game play that”, “not your turn rn”)
 
 ---
 
 ## License
 
-Private / unlicensed unless you add one.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
