@@ -1,4 +1,5 @@
 "use client";
+
 import { useState, useEffect, useRef } from "react";
 import Script from "next/script";
 
@@ -19,351 +20,449 @@ declare global {
 }
 
 export default function Home() {
-  const [messages, setMessages] = useState<string[]>([]);
   const [ws, setWs] = useState<WebSocket | null>(null);
   const [currentGame, setCurrentGame] = useState<GameState | null>(null);
+  const [gameOver, setGameOver] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [findingGame, setFindingGame] = useState(false);
+  const [waitSeconds, setWaitSeconds] = useState(0);
+  const [username, setUsername] = useState("");
+  const sessionIdRef = useRef<string>("");
+  const currentGameRef = useRef<GameState | null>(null);
   const [jqueryLoaded, setJqueryLoaded] = useState(false);
   const [chessboardLoaded, setChessboardLoaded] = useState(false);
   const [chessJsLoaded, setChessJsLoaded] = useState(false);
   const boardRef = useRef<any>(null);
   const chessRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [username, setUsername] = useState("chiraggupta"); // You can make this dynamic
 
-  // Load CSS dynamically
+  const scriptsReady = jqueryLoaded && chessboardLoaded && chessJsLoaded;
+  const connected = ws?.readyState === 1;
+
+  // Load chessboard CSS
   useEffect(() => {
     const link = document.createElement("link");
     link.rel = "stylesheet";
     link.href =
       "https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css";
     document.head.appendChild(link);
-
     return () => {
-      if (document.head.contains(link)) {
-        document.head.removeChild(link);
-      }
+      if (document.head.contains(link)) document.head.removeChild(link);
     };
   }, []);
 
+  // Session id for reconnect (persist in localStorage)
   useEffect(() => {
-    // Connect to WebSocket server at port 8080
-    const websocket = new WebSocket("ws://localhost:8080");
-    websocket.onopen = () => {
-      console.log("Connected to WebSocket server");
-    };
-    websocket.onmessage = (event) => {
-      console.log("Message received:", event.data);
-      setMessages((prev) => [...prev, event.data]);
+    if (typeof window === "undefined") return;
+    let id = localStorage.getItem("chessSessionId");
+    if (!id) {
+      id = crypto.randomUUID?.() ?? `session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      localStorage.setItem("chessSessionId", id);
+    }
+    sessionIdRef.current = id;
+  }, []);
 
-      // Try to parse the message as JSON
-      try {
-        const data = JSON.parse(event.data);
-        console.log("Parsed game data:", data);
+  currentGameRef.current = currentGame;
 
-        // Check if it's a game object with gameState
-        if (data.gameId && data.gameState) {
-          // Update the current game state
-          setCurrentGame(data);
+  // WebSocket with reconnect when in a game
+  useEffect(() => {
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let mounted = true;
+    let websocket: WebSocket;
 
-          // Update the chess.js position and board if they exist
-          if (chessRef.current && boardRef.current) {
-            console.log("Updating board with new FEN:", data.gameState);
-
-            // Load the new position in chess.js
-            chessRef.current.load(data.gameState);
-
-            // Update the board visual position
-            boardRef.current.position(data.gameState.split(" ")[0]);
-
-            // Log whose turn it is
-            const turn = chessRef.current.turn();
-            console.log(`Turn: ${turn === "w" ? "White" : "Black"}`);
-          }
+    function connect() {
+      websocket = new WebSocket("ws://localhost:5556");
+      websocket.onopen = () => {
+        setStatusMessage(null);
+        if (currentGameRef.current && sessionIdRef.current) {
+          websocket.send(
+            JSON.stringify({
+              action: "rejoin",
+              sessionId: sessionIdRef.current,
+            })
+          );
         }
-      } catch (e) {
-        // If it's not JSON, just add it to messages
-        console.log("Non-JSON message received");
-      }
-    };
-    websocket.onerror = (error) => {
-      console.error("WebSocket error:", error);
-    };
-    websocket.onclose = () => {
-      console.log("Disconnected from WebSocket server");
-    };
-    setWs(websocket);
-    // Cleanup on unmount
+      };
+      websocket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.message === "game is over") {
+            if (data.state) {
+              setCurrentGame((prev) =>
+                prev ? { ...prev, gameState: data.state } : null
+              );
+              if (chessRef.current) chessRef.current.load(data.state);
+              if (boardRef.current) boardRef.current.position(data.state.split(" ")[0]);
+            }
+            setGameOver(true);
+            if (data.reason === "opponent_left") {
+              setStatusMessage("Opponent left.");
+              setTimeout(() => {
+                setCurrentGame(null);
+                setGameOver(false);
+                setStatusMessage(null);
+              }, 2000);
+            } else if (data.reason === "resign") {
+              setStatusMessage("Game over (resignation).");
+            } else {
+              setStatusMessage("Game over.");
+            }
+            return;
+          }
+          if (data.gameId && data.gameState) {
+            setFindingGame(false);
+            setGameOver(false);
+            setStatusMessage(null);
+            setCurrentGame(data);
+            return;
+          }
+          if (data.message === "no game to rejoin") {
+            setStatusMessage("No game to rejoin.");
+            setCurrentGame(null);
+            currentGameRef.current = null;
+            return;
+          }
+        } catch {
+          const text = event.data.toString();
+          if (text.includes("connected")) setStatusMessage(null);
+          else if (text.includes("lobby") || text.includes("already in a game"))
+            setFindingGame(false);
+          setStatusMessage(text);
+        }
+      };
+      websocket.onerror = () =>
+        setStatusMessage("Connection error. Is the server running on port 5556?");
+      websocket.onclose = () => {
+        setWs(null);
+        setStatusMessage("Disconnected. Reconnecting…");
+        if (mounted && currentGameRef.current) {
+          reconnectTimeout = setTimeout(() => connect(), 2000);
+        }
+      };
+      setWs(websocket);
+    }
+    connect();
     return () => {
+      mounted = false;
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
       websocket.close();
     };
   }, []);
 
-  // Check if it's the player's turn
   const onDragStart = (
     source: string,
     piece: string,
-    position: any,
-    orientation: string,
+    _position: any,
+    _orientation: string
   ) => {
-    // Check if chess.js is loaded
-    if (!chessRef.current || !currentGame) {
-      return false;
-    }
-
-    // Don't allow moves if game is over
-    if (chessRef.current.game_over()) {
-      console.log("Game is over!");
-      return false;
-    }
-
-    // Get whose turn it is ('w' for white, 'b' for black)
+    if (!chessRef.current || !currentGame || gameOver) return false;
+    if (chessRef.current.game_over()) return false;
     const turn = chessRef.current.turn();
-
-    // Get the player's color ('white' or 'black')
     const playerColor = currentGame.color;
-
-    // Check if it's the player's turn
     if (
       (turn === "w" && playerColor !== "white") ||
       (turn === "b" && playerColor !== "black")
-    ) {
-      console.log("❌ Not your turn!");
+    )
       return false;
-    }
-
-    // Only allow the player to move their own pieces
-    // Piece format: first character is color (w/b), second is piece type
-    const pieceColor = piece[0]; // 'w' or 'b'
+    const pieceColor = piece[0];
     const allowedColor = playerColor === "white" ? "w" : "b";
-
-    if (pieceColor !== allowedColor) {
-      console.log(`❌ You can only move ${playerColor} pieces!`);
-      return false;
-    }
-
+    if (pieceColor !== allowedColor) return false;
     return true;
   };
 
-  // Handle piece drop
   const onDrop = (source: string, target: string) => {
-    // Check if chess.js is loaded
-    if (!chessRef.current) {
-      console.error("Chess.js not loaded");
-      return "snapback";
-    }
-
-    // Try to make the move
+    if (!chessRef.current) return "snapback";
     const move = chessRef.current.move({
       from: source,
       to: target,
-      promotion: "q", // Always promote to queen for simplicity
+      promotion: "q",
     });
-
-    // If the move is illegal, snap back
-    if (move === null) {
-      console.log(`❌ Invalid move: ${source} to ${target}`);
-      return "snapback";
-    }
-
-    // Log the move details
-    console.log(`✅ Valid move: ${move.san}`);
-    console.log("Move details:", {
-      from: move.from,
-      to: move.to,
-      piece: move.piece,
-      captured: move.captured,
-      san: move.san,
-      flags: move.flags,
-      promotion: move.promotion,
-    });
-
-    // Update the board position
-    boardRef.current.position(chessRef.current.fen());
-
-    // Check game state
-    if (chessRef.current.in_checkmate()) {
-      console.log("🏁 Checkmate!");
-    } else if (chessRef.current.in_draw()) {
-      console.log("🤝 Draw!");
-    } else if (chessRef.current.in_stalemate()) {
-      console.log("🤝 Stalemate!");
-    } else if (chessRef.current.in_threefold_repetition()) {
-      console.log("🤝 Draw by threefold repetition!");
-    } else if (chessRef.current.insufficient_material()) {
-      console.log("🤝 Draw by insufficient material!");
-    } else if (chessRef.current.in_check()) {
-      console.log("⚠️ Check!");
-    }
-
-    // Send the move to the server in the required format
+    if (move === null) return "snapback";
+    if (boardRef.current) boardRef.current.position(chessRef.current.fen());
     if (ws && currentGame) {
-      const moveMessage = {
-        username: username,
-        action: "makeMove",
-        move: move.san,
-        gameObj: {
-          gameId: currentGame.gameId,
-          color: currentGame.color,
-          opponent: currentGame.opponent,
-          gameState: chessRef.current.fen(), // Send the updated FEN position
-        },
-        timeControl: "rapid",
-      };
-
-      console.log("Sending move to server:", moveMessage);
-      ws.send(JSON.stringify(moveMessage));
+      ws.send(
+        JSON.stringify({
+          username,
+          action: "makeMove",
+          move: move.san,
+          gameObj: {
+            gameId: currentGame.gameId,
+            color: currentGame.color,
+            opponent: currentGame.opponent,
+            gameState: chessRef.current.fen(),
+          },
+          timeControl: "rapid",
+        })
+      );
     }
+    return undefined;
   };
 
   useEffect(() => {
-    if (currentGame && jqueryLoaded && chessboardLoaded && chessJsLoaded) {
-      // Wait a bit to ensure everything is ready
-      const timer = setTimeout(() => {
-        if (
-          typeof window.Chessboard !== "undefined" &&
-          typeof window.Chess !== "undefined" &&
-          containerRef.current
-        ) {
-          console.log("Creating chessboard with FEN:", currentGame.gameState);
+    if (!currentGame || !scriptsReady) return;
+    const timer = setTimeout(() => {
+      if (
+        typeof window.Chessboard === "undefined" ||
+        typeof window.Chess === "undefined" ||
+        !containerRef.current
+      )
+        return;
+      chessRef.current = new window.Chess(currentGame.gameState);
+      if (boardRef.current) {
+        try {
+          boardRef.current.destroy();
+        } catch {}
+      }
+      try {
+        boardRef.current = window.Chessboard("myBoard", {
+          position: currentGame.gameState.split(" ")[0],
+          orientation: currentGame.color === "white" ? "white" : "black",
+          draggable: true,
+          dropOffBoard: "snapback",
+          pieceTheme:
+            "https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png",
+          onDragStart,
+          onDrop,
+        });
+      } catch {}
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [currentGame, scriptsReady]);
 
-          // Initialize chess.js with the FEN position
-          chessRef.current = new window.Chess(currentGame.gameState);
+  // Sync board when server sends updated FEN (opponent move)
+  useEffect(() => {
+    if (!currentGame || !chessRef.current || !boardRef.current) return;
+    chessRef.current.load(currentGame.gameState);
+    boardRef.current.position(currentGame.gameState.split(" ")[0]);
+  }, [currentGame?.gameState]);
 
-          // Destroy existing board if it exists
-          if (boardRef.current) {
-            try {
-              boardRef.current.destroy();
-            } catch (e) {
-              console.error("Error destroying board:", e);
-            }
-          }
-
-          // Create new board
-          try {
-            boardRef.current = window.Chessboard("myBoard", {
-              position: currentGame.gameState.split(" ")[0],
-              orientation: currentGame.color === "white" ? "white" : "black",
-              draggable: true,
-              dropOffBoard: "snapback",
-              pieceTheme:
-                "https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png",
-              onDragStart: onDragStart,
-              onDrop: onDrop,
-            });
-            console.log("Chessboard created successfully");
-          } catch (error) {
-            console.error("Error creating chessboard:", error);
-          }
-        } else {
-          console.error("Libraries not available");
-        }
-      }, 100);
-
-      return () => clearTimeout(timer);
+  // Timer while finding opponent
+  useEffect(() => {
+    if (!findingGame) {
+      setWaitSeconds(0);
+      return;
     }
-  }, [currentGame, jqueryLoaded, chessboardLoaded, chessJsLoaded]);
+    const start = Date.now();
+    const id = setInterval(() => setWaitSeconds(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [findingGame]);
 
   const enterNewGame = () => {
-    console.log("inside new game function");
-    const createGameAction = {
-      username: username,
-      action: "createGame",
-      timeControl: "rapid",
-    };
-    if (ws) {
-      ws.send(JSON.stringify(createGameAction));
+    if (!username.trim()) {
+      setStatusMessage("Enter a username to find a game.");
+      return;
+    }
+    setStatusMessage(null);
+    setFindingGame(true);
+    if (ws)
+      ws.send(
+        JSON.stringify({
+          username: username.trim(),
+          action: "createGame",
+          timeControl: "rapid",
+          sessionId: sessionIdRef.current || undefined,
+        })
+      );
+  };
+
+  const cancelSearch = () => {
+    if (ws) ws.send(JSON.stringify({ action: "cancelSearch" }));
+    setFindingGame(false);
+    setStatusMessage(null);
+  };
+
+  const resign = () => {
+    if (ws && currentGame) {
+      ws.send(
+        JSON.stringify({
+          action: "resign",
+          gameObj: {
+            gameId: currentGame.gameId,
+            color: currentGame.color,
+            opponent: currentGame.opponent,
+            gameState: currentGame.gameState,
+          },
+        })
+      );
+      setGameOver(true);
+      setStatusMessage("Game over (resignation).");
     }
   };
 
-  const handleJQueryLoad = () => {
-    console.log("jQuery loaded successfully");
-    setJqueryLoaded(true);
+  const leaveGame = () => {
+    if (ws && currentGame) {
+      ws.send(JSON.stringify({ action: "leaveGame", gameId: currentGame.gameId }));
+      setCurrentGame(null);
+      setGameOver(false);
+      setStatusMessage("You left the game.");
+    }
   };
 
-  const handleChessboardLoad = () => {
-    console.log("Chessboard.js loaded successfully");
-    setChessboardLoaded(true);
-  };
-
-  const handleChessJsLoad = () => {
-    console.log("Chess.js loaded successfully");
-    setChessJsLoaded(true);
-  };
+  // Derive turn from server FEN (currentGame.gameState) so it updates when server sends new state.
+  // FEN format: "pieces position active_color ..." — active color is 2nd field, "w" or "b".
+  const activeColor = currentGame?.gameState?.split(" ")[1];
+  const myTurn =
+    currentGame &&
+    activeColor &&
+    !gameOver &&
+    ((activeColor === "w" && currentGame.color === "white") ||
+      (activeColor === "b" && currentGame.color === "black"));
 
   return (
     <>
-      {/* Load jQuery first */}
       <Script
         src="https://code.jquery.com/jquery-3.6.0.min.js"
         strategy="afterInteractive"
-        onLoad={handleJQueryLoad}
-        onError={(e) => console.error("Error loading jQuery:", e)}
+        onLoad={() => setJqueryLoaded(true)}
       />
-
-      {/* Load Chess.js for move validation */}
       <Script
         src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"
         strategy="afterInteractive"
-        onLoad={handleChessJsLoad}
-        onError={(e) => console.error("Error loading chess.js:", e)}
+        onLoad={() => setChessJsLoaded(true)}
       />
-
-      {/* Load Chessboard.js */}
       <Script
         src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"
         strategy="afterInteractive"
-        onLoad={handleChessboardLoad}
-        onError={(e) => console.error("Error loading chessboard.js:", e)}
+        onLoad={() => setChessboardLoaded(true)}
       />
 
-      <div>
-        <main>
-          <h1>testing</h1>
-          <p>
-            WebSocket Status:{" "}
-            {ws?.readyState === 1 ? "Connected" : "Disconnected"}
-          </p>
-          <p>
-            Scripts Status: jQuery {jqueryLoaded ? "✓" : "✗"}, Chess.js{" "}
-            {chessJsLoaded ? "✓" : "✗"}, Chessboard{" "}
-            {chessboardLoaded ? "✓" : "✗"}
-          </p>
-          <div>
-            <h2>Messages:</h2>
-            <ul>
-              {messages.map((msg, i) => (
-                <li key={i}>{msg}</li>
-              ))}
-            </ul>
-          </div>
-          <button
-            onClick={() => {
-              console.log("hello world");
-              enterNewGame();
-            }}
+      <div className="relative z-10 min-h-screen flex flex-col items-center justify-center px-4 py-10">
+        <header className="absolute top-0 left-0 right-0 flex items-center justify-between px-6 py-4">
+          <h1
+            className="text-2xl font-semibold tracking-tight text-[var(--cream)]"
+            style={{ fontFamily: "var(--font-cormorant)" }}
           >
-            Play a rapid game
-          </button>
+            Chess
+          </h1>
+          <div className="flex items-center gap-2">
+            <span
+              className={`h-2 w-2 rounded-full ${
+                connected ? "bg-[var(--success)]" : "bg-[var(--error)]"
+              }`}
+            />
+            <span className="text-sm text-[var(--cream-muted)]">
+              {connected ? "Connected" : "Disconnected"}
+            </span>
+          </div>
+        </header>
 
-          {currentGame && (
-            <div style={{ marginTop: "20px" }} ref={containerRef}>
-              <h2>Chess Game</h2>
-              <p>
-                <strong>Game ID:</strong> {currentGame.gameId}
+        {!currentGame ? (
+          <section className="w-full max-w-md animate-fade-up text-center">
+            <p
+              className="text-[var(--cream-muted)] text-lg mb-8"
+              style={{ fontFamily: "var(--font-cormorant)" }}
+            >
+              Play a rapid game. You’ll be matched with another player.
+            </p>
+            <div className="space-y-4">
+              <input
+                type="text"
+                placeholder="Your username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && enterNewGame()}
+                className="w-full rounded-[var(--radius)] border border-[var(--felt-light)] bg-[var(--felt)] px-4 py-3 text-[var(--cream)] placeholder-[var(--cream-muted)] focus:border-[var(--gold)] focus:outline-none focus:ring-1 focus:ring-[var(--gold)]"
+                disabled={!connected || findingGame}
+              />
+              <button
+                onClick={enterNewGame}
+                disabled={!connected || findingGame || !scriptsReady}
+                className="w-full rounded-[var(--radius)] bg-[var(--gold)] px-4 py-3 font-medium text-[var(--ink)] transition hover:bg-[var(--gold-dim)] hover:text-[var(--cream)] disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {findingGame ? "Finding opponent…" : "Find a game"}
+              </button>
+              {findingGame && (
+                <div className="flex flex-col items-center gap-2">
+                  <div className="flex items-center justify-center gap-2 text-sm text-[var(--cream-muted)]">
+                    <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-[var(--cream-muted)] border-t-[var(--gold)]" aria-hidden />
+                    <span>Waiting {waitSeconds}s</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={cancelSearch}
+                    className="text-sm text-[var(--cream-muted)] underline hover:text-[var(--cream)]"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+            </div>
+            {statusMessage && (
+              <p
+                className="mt-4 text-sm text-[var(--cream-muted)] animate-fade-up"
+                role="status"
+              >
+                {statusMessage}
               </p>
-              <p>
-                <strong>Your Color:</strong> {currentGame.color}
-              </p>
-              <p>
-                <strong>Opponent:</strong> {currentGame.opponent}
-              </p>
+            )}
+          </section>
+        ) : (
+          <section className="flex flex-col items-center gap-6 animate-fade-up">
+            <div className="flex flex-wrap items-center justify-center gap-4 text-sm text-[var(--cream-muted)] animate-fade-up animate-fade-up-delay-1">
+              <span>
+                You play{" "}
+                <strong className="text-[var(--cream)]">
+                  {currentGame.color}
+                </strong>
+              </span>
+              <span>·</span>
+              <span>
+                Opponent:{" "}
+                <strong className="text-[var(--cream)]">
+                  {currentGame.opponent}
+                </strong>
+              </span>
+            </div>
+
+            <div
+              className={`board-frame animate-fade-up animate-fade-up-delay-2 ${myTurn ? "turn-indicator-active" : ""}`}
+              ref={containerRef}
+            >
               <div
                 id="myBoard"
-                style={{ width: "400px", marginTop: "10px" }}
-              ></div>
+                className="min-w-[320px] w-[min(80vw,400px)] aspect-square"
+              />
             </div>
-          )}
-        </main>
+
+            <div
+              className="text-center animate-fade-up animate-fade-up-delay-3"
+              role="status"
+            >
+              {gameOver ? (
+                <p className="text-[var(--gold)] font-medium">Game over.</p>
+              ) : myTurn ? (
+                <p className="text-[var(--gold)]">Your turn</p>
+              ) : (
+                <p className="text-[var(--cream-muted)]">Opponent’s turn</p>
+              )}
+            </div>
+
+            {!gameOver && currentGame && (
+              <div className="flex items-center gap-3 animate-fade-up animate-fade-up-delay-3">
+                <button
+                  type="button"
+                  onClick={resign}
+                  className="rounded-[var(--radius)] border border-[var(--felt-light)] bg-[var(--felt)] px-3 py-2 text-sm text-[var(--cream-muted)] hover:text-[var(--cream)]"
+                >
+                  Resign
+                </button>
+                <button
+                  type="button"
+                  onClick={leaveGame}
+                  className="rounded-[var(--radius)] border border-[var(--felt-light)] bg-[var(--felt)] px-3 py-2 text-sm text-[var(--cream-muted)] hover:text-[var(--cream)]"
+                >
+                  Leave game
+                </button>
+              </div>
+            )}
+
+            {statusMessage && (
+              <p className="text-sm text-[var(--cream-muted)]" role="alert">
+                {statusMessage}
+              </p>
+            )}
+          </section>
+        )}
       </div>
     </>
   );
