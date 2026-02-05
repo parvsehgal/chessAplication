@@ -6,3 +6,4 @@ highLevelDesign.txt
 # AI assistant configs
 .agents/
 .claude/
+.DS_Store
