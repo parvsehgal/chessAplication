@@ -8,6 +8,23 @@ interface GameState {
   color: string;
   opponent: string;
   gameState: string;
+  timeControl?: {
+    initialTime: number;
+    increment: number;
+    type: string;
+  };
+  timerState?: {
+    yourTime: number;
+    opponentTime: number;
+    activePlayer: "white" | "black" | null;
+  };
+}
+
+interface TimerDisplayState {
+  yourTime: number;        // milliseconds
+  opponentTime: number;    // milliseconds
+  activePlayer: "white" | "black" | null;
+  lastUpdate: number;      // timestamp
 }
 
 declare global {
@@ -27,6 +44,8 @@ export default function Home() {
   const [findingGame, setFindingGame] = useState(false);
   const [waitSeconds, setWaitSeconds] = useState(0);
   const [username, setUsername] = useState("");
+  const [timeControl, setTimeControl] = useState<string>("rapid");
+  const [timerState, setTimerState] = useState<TimerDisplayState | null>(null);
   const sessionIdRef = useRef<string>("");
   const currentGameRef = useRef<GameState | null>(null);
   const [jqueryLoaded, setJqueryLoaded] = useState(false);
@@ -35,6 +54,7 @@ export default function Home() {
   const boardRef = useRef<any>(null);
   const chessRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const scriptsReady = jqueryLoaded && chessboardLoaded && chessJsLoaded;
   const connected = ws?.readyState === 1;
@@ -71,7 +91,7 @@ export default function Home() {
     let websocket: WebSocket;
 
     function connect() {
-      websocket = new WebSocket("ws://localhost:5556");
+      websocket = new WebSocket("ws://localhost:5555");
       websocket.onopen = () => {
         setStatusMessage(null);
         if (currentGameRef.current && sessionIdRef.current) {
@@ -101,12 +121,36 @@ export default function Home() {
                 setCurrentGame(null);
                 setGameOver(false);
                 setStatusMessage(null);
+                setTimerState(null);
               }, 2000);
             } else if (data.reason === "resign") {
               setStatusMessage("Game over (resignation).");
+            } else if (data.reason === "timeout") {
+              const winner = data.winner;
+              const loser = data.loser;
+              const isWinner = currentGameRef.current?.color === winner;
+              setStatusMessage(`Time out! ${isWinner ? 'You win!' : 'You lose!'}`);
             } else {
               setStatusMessage("Game over.");
             }
+            // Clear timer on game over
+            setTimerState(null);
+            if (timerIntervalRef.current) {
+              clearInterval(timerIntervalRef.current);
+              timerIntervalRef.current = null;
+            }
+            return;
+          }
+          if (data.type === "timerUpdate") {
+            const serverTimerState = data.timerState;
+            const isWhite = currentGameRef.current?.color === "white";
+
+            setTimerState({
+              yourTime: isWhite ? serverTimerState.whiteTime : serverTimerState.blackTime,
+              opponentTime: isWhite ? serverTimerState.blackTime : serverTimerState.whiteTime,
+              activePlayer: serverTimerState.activePlayer,
+              lastUpdate: Date.now()
+            });
             return;
           }
           if (data.gameId && data.gameState) {
@@ -114,6 +158,26 @@ export default function Home() {
             setGameOver(false);
             setStatusMessage(null);
             setCurrentGame(data);
+
+            // Set timer state if provided
+            if (data.timerState) {
+              const isWhite = data.color === "white";
+              setTimerState({
+                yourTime: isWhite ? data.timerState.yourTime : data.timerState.opponentTime,
+                opponentTime: isWhite ? data.timerState.opponentTime : data.timerState.yourTime,
+                activePlayer: data.timerState.activePlayer,
+                lastUpdate: Date.now()
+              });
+            } else {
+              setTimerState(null);
+            }
+
+            // Clear any existing timer interval
+            if (timerIntervalRef.current) {
+              clearInterval(timerIntervalRef.current);
+              timerIntervalRef.current = null;
+            }
+
             return;
           }
           if (data.message === "no game to rejoin") {
@@ -190,8 +254,7 @@ export default function Home() {
             color: currentGame.color,
             opponent: currentGame.opponent,
             gameState: chessRef.current.fen(),
-          },
-          timeControl: "rapid",
+          }
         })
       );
     }
@@ -247,6 +310,69 @@ export default function Home() {
     return () => clearInterval(id);
   }, [findingGame]);
 
+  // Client-side timer countdown
+  useEffect(() => {
+    if (!timerState || !timerState.activePlayer) {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
+      }
+      return;
+    }
+
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current);
+    }
+
+    timerIntervalRef.current = setInterval(() => {
+      setTimerState(prev => {
+        if (!prev) return null;
+        const now = Date.now();
+        const elapsed = now - prev.lastUpdate;
+
+        const newState = { ...prev, lastUpdate: now };
+        if (prev.activePlayer === currentGame?.color) {
+          newState.yourTime = Math.max(0, prev.yourTime - elapsed);
+        } else {
+          newState.opponentTime = Math.max(0, prev.opponentTime - elapsed);
+        }
+
+        return newState;
+      });
+    }, 100);
+
+    return () => {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
+      }
+    };
+  }, [timerState?.activePlayer, currentGame?.color]);
+
+  const formatTime = (ms: number): string => {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  };
+
+  const TimerDisplay: React.FC<{
+    time: number;
+    label: string;
+    isActive: boolean;
+    color: "white" | "black";
+  }> = ({ time, label, isActive, color }) => {
+    const formattedTime = formatTime(time);
+    const isLowTime = time < 30000; // Less than 30 seconds
+
+    return (
+      <div className={`timer-display ${isActive ? 'active' : ''} ${color} ${isLowTime ? 'low-time' : ''}`}>
+        <div className="timer-label">{label}</div>
+        <div className={`timer-value ${isLowTime ? 'low-time' : ''}`}>{formattedTime}</div>
+      </div>
+    );
+  };
+
   const enterNewGame = () => {
     if (!username.trim()) {
       setStatusMessage("Enter a username to find a game.");
@@ -259,7 +385,7 @@ export default function Home() {
         JSON.stringify({
           username: username.trim(),
           action: "createGame",
-          timeControl: "rapid",
+          timeControl: timeControl,
           sessionId: sessionIdRef.current || undefined,
         })
       );
@@ -355,6 +481,20 @@ export default function Home() {
               Play a rapid game. You’ll be matched with another player.
             </p>
             <div className="space-y-4">
+              <div className="flex gap-2">
+                <select
+                  value={timeControl}
+                  onChange={(e) => setTimeControl(e.target.value)}
+                  className="w-full rounded-[var(--radius)] border border-[var(--felt-light)] bg-[var(--felt)] px-4 py-3 text-[var(--cream)] focus:border-[var(--gold)] focus:outline-none focus:ring-1 focus:ring-[var(--gold)]"
+                  disabled={!connected || findingGame}
+                >
+                  <option value="rapid">Rapid (10|5)</option>
+                  <option value="blitz">Blitz (3|2)</option>
+                  <option value="bullet">Bullet (1|0)</option>
+                  <option value="5|3">5|3 (5 min + 3 sec)</option>
+                  <option value="15|10">15|10 (15 min + 10 sec)</option>
+                </select>
+              </div>
               <input
                 type="text"
                 placeholder="Your username"
@@ -413,6 +553,23 @@ export default function Home() {
                 </strong>
               </span>
             </div>
+
+            {timerState && currentGame && (
+              <div className="timer-container flex items-center justify-center gap-6 animate-fade-up animate-fade-up-delay-1">
+                <TimerDisplay
+                  time={timerState.yourTime}
+                  label="You"
+                  isActive={timerState.activePlayer === currentGame.color}
+                  color={currentGame.color as "white" | "black"}
+                />
+                <TimerDisplay
+                  time={timerState.opponentTime}
+                  label="Opponent"
+                  isActive={timerState.activePlayer !== currentGame.color}
+                  color={currentGame.color === "white" ? "black" : "white"}
+                />
+              </div>
+            )}
 
             <div
               className={`board-frame animate-fade-up animate-fade-up-delay-2 ${myTurn ? "turn-indicator-active" : ""}`}

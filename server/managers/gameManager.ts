@@ -10,6 +10,21 @@ interface gameRequest {
   id: WebSocket;
   sessionId?: string;
 }
+
+interface TimeControl {
+  initialTime: number; // milliseconds
+  increment: number;   // milliseconds per move
+  type: "rapid" | "blitz" | "bullet" | "custom";
+}
+
+interface TimerState {
+  whiteTime: number;    // remaining time in ms
+  blackTime: number;    // remaining time in ms
+  lastUpdate: number;   // timestamp when timer was last updated
+  activePlayer: "white" | "black" | null;
+  gameOver: boolean;
+}
+
 export interface playerGameObj {
   gameId: string;
   color: "white" | "black";
@@ -26,6 +41,10 @@ export class Game {
   sessionIdW: string | undefined;
   sessionIdB: string | undefined;
   moveManagerOfGame: moveManager;
+  timeControl: TimeControl;
+  timerState: TimerState;
+  timerInterval: NodeJS.Timeout | null;
+  private lastBroadcastTime: number = 0;
 
   constructor(req1: gameRequest, req2: gameRequest) {
     this.gameId = randomUUID().split("-")[0]; // Short unique ID
@@ -45,11 +64,25 @@ export class Game {
       `Game ${this.gameId} created: ${this.playerW} (W) vs ${this.playerB} (B)`,
     );
 
+    this.timeControl = this.parseTimeControl(req1.timeControl);
+    this.timerState = {
+      whiteTime: this.timeControl.initialTime,
+      blackTime: this.timeControl.initialTime,
+      lastUpdate: Date.now(),
+      activePlayer: "white", // White starts
+      gameOver: false
+    };
+    this.timerInterval = null;
+    this.lastBroadcastTime = 0;
+    this.startTimer();
+
     const gameObjW = {
       gameId: this.gameId,
       color: "white",
       opponent: this.playerB,
       gameState: this.gameState,
+      timeControl: this.timeControl,
+      timerState: this.getTimerStateForPlayer("white")
     };
 
     const gameObjB = {
@@ -57,11 +90,153 @@ export class Game {
       color: "black",
       opponent: this.playerW,
       gameState: this.gameState,
+      timeControl: this.timeControl,
+      timerState: this.getTimerStateForPlayer("black")
     };
 
     this.sendToWhite(gameObjW);
     this.sendToBlack(gameObjB);
     this.moveManagerOfGame = new moveManager(this.gameState);
+  }
+
+  private parseTimeControl(timeControlStr: string): TimeControl {
+    // Parse strings like "rapid", "blitz", "10|5" (10 minutes + 5 second increment)
+    // Default: rapid = 10 minutes + 5 second increment
+    if (timeControlStr === "rapid") {
+      return { initialTime: 10 * 60 * 1000, increment: 5 * 1000, type: "rapid" };
+    }
+    if (timeControlStr === "blitz") {
+      return { initialTime: 3 * 60 * 1000, increment: 2 * 1000, type: "blitz" };
+    }
+    if (timeControlStr === "bullet") {
+      return { initialTime: 1 * 60 * 1000, increment: 0, type: "bullet" };
+    }
+
+    // Parse "10|5" format (10 minutes + 5 second increment)
+    const parts = timeControlStr.split("|");
+    if (parts.length === 2) {
+      const minutes = parseInt(parts[0]);
+      const incrementSeconds = parseInt(parts[1]);
+      if (!isNaN(minutes) && !isNaN(incrementSeconds)) {
+        return {
+          initialTime: minutes * 60 * 1000,
+          increment: incrementSeconds * 1000,
+          type: "custom"
+        };
+      }
+    }
+
+    // Default to rapid
+    return { initialTime: 10 * 60 * 1000, increment: 5 * 1000, type: "rapid" };
+  }
+
+  private startTimer(): void {
+    this.timerInterval = setInterval(() => this.updateTimer(), 100);
+  }
+
+  private updateTimer(): void {
+    if (!this.timerState.activePlayer || this.timerState.gameOver) return;
+
+    const now = Date.now();
+    const elapsed = now - this.timerState.lastUpdate;
+
+    if (this.timerState.activePlayer === "white") {
+      this.timerState.whiteTime -= elapsed;
+      if (this.timerState.whiteTime <= 0) {
+        this.timerState.whiteTime = 0;
+        this.handleTimeout("white");
+      }
+    } else {
+      this.timerState.blackTime -= elapsed;
+      if (this.timerState.blackTime <= 0) {
+        this.timerState.blackTime = 0;
+        this.handleTimeout("black");
+      }
+    }
+
+    this.timerState.lastUpdate = now;
+
+    // Broadcast timer updates every 500ms to reduce WebSocket traffic
+    if (now - this.lastBroadcastTime > 500) {
+      this.broadcastTimerUpdate();
+      this.lastBroadcastTime = now;
+    }
+  }
+
+  private handleTimeout(loser: "white" | "black"): void {
+    this.timerState.gameOver = true;
+    if (this.timerInterval) {
+      clearInterval(this.timerInterval);
+      this.timerInterval = null;
+    }
+
+    const winner = loser === "white" ? "black" : "white";
+    const timeoutMsg = {
+      state: this.gameState,
+      message: "game is over",
+      reason: "timeout",
+      winner: winner,
+      loser: loser
+    };
+
+    this.sendToWhite(timeoutMsg);
+    this.sendToBlack(timeoutMsg);
+  }
+
+  private broadcastTimerUpdate(): void {
+    const timerUpdate = {
+      type: "timerUpdate",
+      timerState: this.timerState
+    };
+    this.sendToWhite(timerUpdate);
+    this.sendToBlack(timerUpdate);
+  }
+
+  switchTimer(): void {
+    const now = Date.now();
+    const elapsed = now - this.timerState.lastUpdate;
+
+    // Apply time used by previous player
+    if (this.timerState.activePlayer === "white") {
+      this.timerState.whiteTime -= elapsed;
+      this.timerState.whiteTime += this.timeControl.increment; // Add increment
+    } else if (this.timerState.activePlayer === "black") {
+      this.timerState.blackTime -= elapsed;
+      this.timerState.blackTime += this.timeControl.increment;
+    }
+
+    // Switch active player
+    this.timerState.activePlayer =
+      this.timerState.activePlayer === "white" ? "black" : "white";
+    this.timerState.lastUpdate = now;
+
+    this.broadcastTimerUpdate();
+  }
+
+  pauseTimer(): void {
+    if (this.timerInterval) {
+      clearInterval(this.timerInterval);
+      this.timerInterval = null;
+    }
+  }
+
+  resumeTimer(): void {
+    if (!this.timerInterval && !this.timerState.gameOver) {
+      this.timerState.lastUpdate = Date.now();
+      this.startTimer();
+    }
+  }
+
+  getTimerStateForPlayer(color: "white" | "black"): {
+    yourTime: number;
+    opponentTime: number;
+    activePlayer: "white" | "black" | null;
+  } {
+    return {
+      yourTime: color === "white" ? this.timerState.whiteTime : this.timerState.blackTime,
+      opponentTime: color === "white" ? this.timerState.blackTime : this.timerState.whiteTime,
+      activePlayer: this.timerState.activePlayer
+    };
   }
 
   private sendToWhite(data: object) {
@@ -74,11 +249,17 @@ export class Game {
   clearSocket(ws: WebSocket) {
     if (this.socketW === ws) this.socketW = null;
     else if (this.socketB === ws) this.socketB = null;
+    // Pause timer when a player disconnects
+    this.pauseTimer();
   }
 
   replaceSocketBySessionId(sessionId: string, ws: WebSocket) {
     if (this.sessionIdW === sessionId) this.socketW = ws;
     else if (this.sessionIdB === sessionId) this.socketB = ws;
+    // Resume timer if both players are now connected
+    if (this.socketW && this.socketB && !this.timerState.gameOver) {
+      this.resumeTimer();
+    }
   }
 
   isPlayerInGame(username: string): boolean {
@@ -91,12 +272,16 @@ export class Game {
       move,
     );
     if (acutalMoveOutput.newState && !acutalMoveOutput.isGameEnd) {
+      // Switch timer to other player
+      this.switchTimer();
       this.gameState = acutalMoveOutput.newState;
       const gameObjW = {
         gameId: this.gameId,
         color: "white",
         opponent: this.playerB,
         gameState: this.gameState,
+        timeControl: this.timeControl,
+        timerState: this.getTimerStateForPlayer("white")
       };
 
       const gameObjB = {
@@ -104,10 +289,15 @@ export class Game {
         color: "black",
         opponent: this.playerW,
         gameState: this.gameState,
+        timeControl: this.timeControl,
+        timerState: this.getTimerStateForPlayer("black")
       };
       this.sendToWhite(gameObjW);
       this.sendToBlack(gameObjB);
     } else if (acutalMoveOutput.isGameEnd && acutalMoveOutput.newState) {
+      // Game ended by checkmate or stalemate, stop timer
+      this.pauseTimer();
+      this.timerState.gameOver = true;
       this.gameState = acutalMoveOutput.newState;
       const gameOverMsg = {
         state: this.gameState,
@@ -125,6 +315,10 @@ export class Game {
   }
 
   resign(gameObj: playerGameObj) {
+    // Stop timer when resigning
+    this.pauseTimer();
+    this.timerState.gameOver = true;
+
     const msg = {
       state: this.gameState,
       message: "game is over",
@@ -135,6 +329,10 @@ export class Game {
   }
 
   leaveGame(ws: WebSocket) {
+    // Stop timer when player leaves
+    this.pauseTimer();
+    this.timerState.gameOver = true;
+
     const isWhite = this.socketW === ws;
     const opponentSocket = isWhite ? this.socketB : this.socketW;
     if (opponentSocket?.readyState === 1)
@@ -247,6 +445,8 @@ export class gameManager {
       color: isWhite ? "white" : "black",
       opponent: isWhite ? game.playerB : game.playerW,
       gameState: game.gameState,
+      timeControl: game.timeControl,
+      timerState: game.getTimerStateForPlayer(isWhite ? "white" : "black")
     };
     ws.send(JSON.stringify(payload));
   }

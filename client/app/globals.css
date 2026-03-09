@@ -88,3 +88,46 @@ body {
 .animate-fade-up-delay-1 { animation-delay: 0.08s; }
 .animate-fade-up-delay-2 { animation-delay: 0.16s; }
 .animate-fade-up-delay-3 { animation-delay: 0.24s; }
+
+/* Timer display styles */
+.timer-container {
+  margin-bottom: 1rem;
+}
+
+.timer-display {
+  background: var(--felt);
+  border: 1px solid var(--felt-light);
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+  min-width: 100px;
+  text-align: center;
+  transition: all 0.2s ease;
+}
+
+.timer-display.active {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 1px var(--gold);
+}
+
+.timer-display.low-time {
+  color: #ff6b6b;
+}
+
+.timer-display.low-time .timer-value {
+  font-weight: bold;
+}
+
+.timer-label {
+  font-size: 0.75rem;
+  color: var(--cream-muted);
+  margin-bottom: 0.25rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.timer-value {
+  font-size: 1.25rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--cream);
+}
